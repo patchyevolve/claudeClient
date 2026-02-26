@@ -63,7 +63,7 @@ class WriteFileTool : public Tool {
 public:
     std::string execute(const json& args) override {
 
-        if (!args.contains("patch") || !args["path"].is_string() ||
+        if (!args.contains("path") || !args["path"].is_string() ||
             !args.contains("content") || !args["content"].is_string())
         {
             return "ERROR: invalid arguments";
