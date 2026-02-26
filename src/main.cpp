@@ -58,6 +58,46 @@ public:
     }
 };
 
+// Write-TOOL
+class WriteFileTool : public Tool {
+public:
+    std::string execute(const json& args) override {
+
+        if (!args.contains("patch") || !args["path"].is_string() ||
+            !args.contains("content") || !args["content"].is_string())
+        {
+            return "ERROR: invalid arguments";
+        }
+
+        std::string path = args["path"];
+        std::string content = args["content"];
+
+        if (path.find("..") != std::string::npos ||
+            path.front() == '/' ||
+            path.find(":") != std::string::npos) 
+        {
+            return "ERROR: invalid arguments ";
+        }
+
+        const size_t MAX_SIZE = 1'000'000; 
+        if (content.size() > MAX_SIZE) {
+            return "ERROR: content too large.";
+        }
+
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+
+        if (!file.is_open()) {
+            return "ERROR: could not open file for writing.";
+        }
+
+        if (!file.write(content.data(), content.size())) {
+            return "ERROR: write failed.";
+        }
+
+        return "SUCESS: file written.";
+    }
+};
+
 
 // Tool-Registry
 
@@ -111,7 +151,9 @@ int main(int argc, char* argv[]) {
 
     ToolRegistry registry;
     ReadFileTool readTool;
+    WriteFileTool writeTool;
     registry.register_tool("read_file", &readTool);
+    registry.register_tool("write_file", &writeTool);
 
     json tools = json::array({
         {
@@ -128,6 +170,27 @@ int main(int argc, char* argv[]) {
                         }}
                     }},
                     {"required", json::array({"path"})}
+                }},
+            }}
+        },
+        {
+            {"type", "function"},
+            {"function", {
+                {"name", "write_file"},
+                {"description", "Write content to a file (overwrites if exists)"},
+                {"parameters", {
+                    {"type", "object"},
+                    {"properties", {
+                        {"path",{
+                            {"type", "string"},
+                            {"description", "The path to the file to read"}
+                        }},
+                        {"content", {
+                            {"type", "string"},
+                            {"description", "content to write into file"}
+                        }}
+                    }},
+                    {"required", json::array({"path", "content"})}
                 }},
             }}
         }
