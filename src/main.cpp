@@ -1,17 +1,56 @@
 #include <cstdlib>
+#include <cstdio>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <array>
 
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
 
-//tool interface
 
+//startup config
+struct RuntimeConfig {
+    std::string prompt;
+    std::string api_key;
+    std::string base_url;
+};
+
+RuntimeConfig load_config(int argc, char* argv[]) {
+    // api calling section
+
+    if (argc < 3 || std::string(argv[1]) != "-p") {
+        throw std::runtime_error("Expected first argument to be '-p'");
+    }
+
+    std::string prompt = argv[2];
+
+    if (prompt.empty()) {
+        throw std::runtime_error("Prompt must not be empty");
+    }
+
+    const char* api_key_env = std::getenv("OPENROUTER_API_KEY");
+    const char* base_url_env = std::getenv("OPENROUTER_BASE_URL");
+
+    std::string api_key = api_key_env ? api_key_env : "";
+    std::string base_url = base_url_env ? base_url_env : "https://openrouter.ai/api/v1";
+
+    if (api_key.empty()) {
+        throw std::runtime_error("OPENROUTER_API_KEY is not set");
+    }
+
+    return RuntimeConfig{
+        prompt,
+        api_key,
+        base_url
+    };
+}
+
+//tool interface
 class Tool {
 public:
     virtual std::string execute(const json& args) = 0;
@@ -40,7 +79,7 @@ public:
         
         file.seekg(0, std::ios::end);
         std::streamsize size = file.tellg();
-        if (size <= 0) {
+        if (size < 0) {
             return "ERROR: could not determine file size.";
         }
         file.seekg(0, std::ios::beg);
@@ -52,7 +91,9 @@ public:
         }
 
         std::string content(size, '\0');
-        file.read(&content[0], size);
+        if (!file.read(&content[0], size)) {
+            return "ERROR: file read failed.";
+        }
 
         return content;
     }
@@ -72,8 +113,9 @@ public:
         std::string path = args["path"];
         std::string content = args["content"];
 
-        if (path.find("..") != std::string::npos ||
-            path.front() == '/' ||
+        if (path.empty() ||
+            path.find("..") != std::string::npos ||
+            path[0] == '/' ||
             path.find(":") != std::string::npos) 
         {
             return "ERROR: invalid arguments ";
@@ -98,9 +140,58 @@ public:
     }
 };
 
+class BashTool : public Tool {
+public:
+
+    std::string execute(const json& args) override {
+
+        if (!args.contains("command") || !args["command"].is_string()) {
+            return "ERROR: inveild arguments.";
+        }
+
+        std::string command = args["command"];
+
+        if (command.empty()) {
+            return "ERROR: empty command";
+        }
+
+        if (command.find("sudo") != std::string::npos ||
+            command.find("rm -rf /") != std::string::npos) {
+            return "ERROR: command not allowed.";
+        }
+
+        const size_t MAX_OUTPUT = 1'000'000;
+
+        FILE* pipe = _popen(command.c_str(), "r");
+        if (!pipe) {
+            return "ERROR: failed to execute command.";
+        }
+
+        std::string result;
+        char buffer[4096];
+
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            result += buffer;
+
+            if (result.size() > MAX_OUTPUT) {
+                _pclose(pipe);
+                return "ERROR: output too large.";
+            }
+        }
+
+        int exit_code = _pclose(pipe);
+
+        std::ostringstream response;
+        response << "EXIT_CODE: " << exit_code << "\n";
+        response << "OUTPUT:\n" << result;
+
+        return response.str();
+
+    }
+
+};
 
 // Tool-Registry
-
 class ToolRegistry {
 public:
     void register_tool(const std::string& name, Tool* tool) {
@@ -121,30 +212,19 @@ private:
 
 int main(int argc, char* argv[]) {
     
-    // api calling section
+    RuntimeConfig config;
 
-    if (argc < 3 || std::string(argv[1]) != "-p") {
-        std::cerr << "Expected first argument to be '-p'" << std::endl;
+    try {
+        config = load_config(argc, argv);
+    }
+    catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
         return 1;
     }
 
-    std::string prompt = argv[2];
-
-    if (prompt.empty()) {
-        std::cerr << "Prompt must not be empty" << std::endl;
-        return 1;
-    }
-
-    const char* api_key_env = std::getenv("OPENROUTER_API_KEY");
-    const char* base_url_env = std::getenv("OPENROUTER_BASE_URL");
-
-    std::string api_key = api_key_env ? api_key_env : "";
-    std::string base_url = base_url_env ? base_url_env : "https://openrouter.ai/api/v1";
-
-    if (api_key.empty()) {
-        std::cerr << "OPENROUTER_API_KEY is not set" << std::endl;
-        return 1;
-    }
+    std::string prompt = config.prompt;
+    std::string api_key = config.api_key;
+    std::string base_url = config.base_url;
 
 
     // Tool setup
@@ -152,8 +232,10 @@ int main(int argc, char* argv[]) {
     ToolRegistry registry;
     ReadFileTool readTool;
     WriteFileTool writeTool;
+    BashTool bashTool;
     registry.register_tool("read_file", &readTool);
     registry.register_tool("write_file", &writeTool);
+    registry.register_tool("bash", &bashTool);
 
     json tools = json::array({
         {
@@ -170,7 +252,7 @@ int main(int argc, char* argv[]) {
                         }}
                     }},
                     {"required", json::array({"path"})}
-                }},
+                }}
             }}
         },
         {
@@ -191,7 +273,24 @@ int main(int argc, char* argv[]) {
                         }}
                     }},
                     {"required", json::array({"path", "content"})}
-                }},
+                }}
+            }}
+        },
+        {
+            {"type", "function"},
+            {"function", {
+                {"name", "bash"},
+                {"description", "Execute a shell command and return stdout and exit code"},
+                {"parameters", {
+                    {"type", "object"},
+                    {"properties", {
+                        {"command",{
+                            {"type", "string"},
+                            {"description", "Shell command to execute"}
+                        }}
+                    }},
+                    {"required", json::array({"command"})}
+                }}
             }}
         }
     });
@@ -202,8 +301,10 @@ int main(int argc, char* argv[]) {
     });
 
     // TOOL LOOP
-
-    while (true) {
+    
+    int iterations = 0; 
+    const int MAX_ITER = 10;
+    while (iterations++ < MAX_ITER) {
 
         json request_body = {
             {"model", "anthropic/claude-haiku-4.5"},
@@ -251,6 +352,7 @@ int main(int argc, char* argv[]) {
         }
         catch (...) {
             std::cerr << "Invalid JSON response \n";
+            return 1;
         }
 
         if (!result.contains("choices")||
@@ -268,7 +370,13 @@ int main(int argc, char* argv[]) {
         if (!message.contains("role")) {
             message["role"] = "assistant";
         }
+
         messages.push_back(message);
+
+        const size_t MAX_MESSAGES = 30;
+        if (messages.size() > MAX_MESSAGES) {
+            messages.erase(messages.begin() + 1);
+        }
 
         //check for the tool calls
         if (message.contains("tool_calls")) {
@@ -277,7 +385,13 @@ int main(int argc, char* argv[]) {
                 std::string name = call["function"]["name"];
                 std::string args_str = call["function"]["arguments"];
 
-                json args = json::parse(args_str);
+                json args;
+                try {
+                    args = json::parse(args_str);
+                }
+                catch (...) {
+                    args = json::object();
+                }
 
                 Tool* tool = registry.get(name);
                 std::string tool_result = "ERROR: TOOL NOT FOUND";
@@ -304,5 +418,8 @@ int main(int argc, char* argv[]) {
         break;
     }
 
+    if (iterations > MAX_ITER) {
+        std::cerr << "Max tool iterations exceeded.\n";
+    }
     return 0;
 }
