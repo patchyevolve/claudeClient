@@ -12,6 +12,11 @@
 
 using json = nlohmann::json;
 
+#ifdef _WIN32
+#define popen _popen
+#define pclose _pclose
+#endif
+
 
 //startup config
 struct RuntimeConfig {
@@ -162,7 +167,7 @@ public:
 
         const size_t MAX_OUTPUT = 1'000'000;
 
-        FILE* pipe = _popen(command.c_str(), "r");
+        FILE* pipe = popen(command.c_str(), "r");
         if (!pipe) {
             return "ERROR: failed to execute command.";
         }
@@ -174,12 +179,12 @@ public:
             result += buffer;
 
             if (result.size() > MAX_OUTPUT) {
-                _pclose(pipe);
+                pclose(pipe);
                 return "ERROR: output too large.";
             }
         }
 
-        int exit_code = _pclose(pipe);
+        int exit_code = pclose(pipe);
 
         std::ostringstream response;
         response << "EXIT_CODE: " << exit_code << "\n";
